@@ -29,7 +29,7 @@ which `--offline` turns off.
 ## Install
 
 ```bash
-git clone <this repo> ~/.local/share/autocut
+git clone https://github.com/snipseas/autocut.git ~/.local/share/autocut
 ```
 
 ```bash
