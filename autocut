@@ -1,0 +1,211 @@
+#!/usr/bin/env bash
+# autocut: raw screen recording (+ your script) -> edited Kdenlive project, and optionally a 1080p60 MP4.
+# `autocut --help` for usage, README.md for setup.
+set -euo pipefail
+
+# Everything lives next to this file (the command on your PATH is a link to it).
+HOME_DIR="${AUTOCUT_HOME:-$(dirname "$(realpath "${BASH_SOURCE[0]}")")}"
+
+# Optional settings file: plain AUTOCUT_NAME=value lines (see config.example).
+# Anything already set in the environment wins over the file.
+CONFIG="${AUTOCUT_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/autocut/config}"
+if [ -f "$CONFIG" ]; then
+  while IFS='=' read -r key value || [ -n "$key" ]; do
+    [[ "$key" =~ ^AUTOCUT_[A-Z_]+$ ]] || continue
+    [ -z "${!key:-}" ] || continue
+    value="${value%$'\r'}"; value="${value%\"}"; value="${value#\"}"
+    value="${value/#\~/$HOME}"; value="${value//\$HOME/$HOME}"
+    export "$key=$value"
+  done < "$CONFIG"
+fi
+
+PY="$HOME_DIR/venv/bin/python"
+export HF_HOME="$HOME_DIR/models"
+PROJECTS="${AUTOCUT_PROJECTS:-$HOME/Videos/kdenlive}"
+EXPORTS="${AUTOCUT_EXPORTS:-$HOME/Videos/kdenlive exports}"
+IMAGES="${AUTOCUT_IMAGES:-$HOME/Videos/media imports/autocut images}"
+export AUTOCUT_KEYWORDS="${AUTOCUT_KEYWORDS:-$HOME/Videos/media imports/keywords}"
+MODEL="${AUTOCUT_MODEL:-small.en}"
+DEVICE="${AUTOCUT_DEVICE:-cpu}"
+BRANDS="$HOME_DIR/brands"      # lines: name|template project|card colour|music (if template has none)|heard as
+
+die() { echo "autocut: $*" >&2; exit 1; }
+brand_field() { [ -f "$BRANDS" ] && awk -F'|' -v b="$1" -v f="$2" 'tolower($1)==tolower(b){print $f}' "$BRANDS"; }
+
+usage() {
+  cat <<EOF
+autocut: raw screen recording -> edited Kdenlive project (and optionally a 1080p60 MP4)
+
+  autocut RECORDING.mp4 [options]
+    --render              also export 1920x1080 60fps H.264/AAC MP4
+    --brand NAME          which brand's look to use (default: guessed from what you say, then from the script)
+    --script FILE         your script; [[keywords]] and [links](url) pop up as images when said
+    --offline             keyword images only from your keywords folder (no web lookups)
+    --no-zoom             no automatic zoom-ins
+    --template FILE       use any finished project as the style template instead of a brand
+
+  autocut --brands        list brands
+  autocut --set-brand NAME PROJECT [COLOR] [MUSIC] [HEARD]
+                          add/change a brand: a finished project to copy the style from, card colour
+                          0xRRGGBB, music to add when the template has none ("none" = no music), and
+                          how the name sounds in a transcript (a pattern, e.g. "bright *no")
+  autocut --check         check that everything autocut needs is installed and set up
+
+  Project: $PROJECTS/<name> (autocut).kdenlive
+  Video:   $EXPORTS/<name> (autocut).mp4
+  Images:  $IMAGES/<name>/
+           (your own, used first: $AUTOCUT_KEYWORDS/<keyword>.png)
+EOF
+}
+
+# The brand whose "heard as" pattern (5th column, default: its name) appears in the text.
+# If several match, the longest pattern wins ("bright *no" before "bright").
+guess_brand() {
+  local list b p
+  list=$(awk -F'|' 'NF && $1 !~ /^#/ {p = ($5 != "" ? $5 : tolower($1)); print length(p) "|" $1 "|" p}' "$BRANDS" \
+         | sort -t'|' -k1,1nr -s)
+  while IFS='|' read -r _ b p; do
+    [ -n "$b" ] || continue
+    if grep -qiE -- "$p" <<< "$1"; then echo "$b"; return 0; fi
+  done <<< "$list"
+  return 0
+}
+
+check() {
+  local bad=0 c d b tpl col mus _
+  ok()   { printf '  ok       %s\n' "$*"; }
+  miss() { printf '  MISSING  %s\n' "$*"; bad=1; }
+  note() { printf '  note     %s\n' "$*"; }
+  echo "autocut is in $HOME_DIR"
+  if [ -f "$CONFIG" ]; then echo "settings from $CONFIG"; else echo "no settings file ($CONFIG), using defaults"; fi
+  echo "Programs"
+  for c in ffmpeg ffprobe fc-match column; do
+    if command -v "$c" >/dev/null; then ok "$c"; else miss "$c  (install it with your package manager)"; fi
+  done
+  if [ -x "$PY" ] && "$PY" -I -c 'import faster_whisper, numpy' 2>/dev/null; then ok "python environment"
+  else miss "python environment  (run $HOME_DIR/install.sh)"; fi
+  if c=$("$HOME_DIR/render.sh" --which 2>/dev/null); then ok "melt for --render: $c"
+  else note "no melt found: projects still build, but --render needs Kdenlive (Flatpak) or melt"; fi
+  if [ -d "$HF_HOME/hub/models--Systran--faster-whisper-$MODEL" ]; then ok "speech model $MODEL ($DEVICE)"
+  else note "speech model $MODEL downloads itself on the first run"; fi
+  echo "Folders"
+  for d in "projects:$PROJECTS" "renders:$EXPORTS" "card images:$IMAGES" "your keyword images:$AUTOCUT_KEYWORDS"; do
+    if [ -d "${d#*:}" ]; then ok "${d%%:*}: ${d#*:}"; else note "${d%%:*}: ${d#*:}  (not there yet; made when needed)"; fi
+  done
+  echo "Brands"
+  if [ ! -s "$BRANDS" ]; then
+    note "none yet. Add one from a finished project: autocut --set-brand NAME PROJECT.kdenlive"
+  else
+    while IFS='|' read -r b tpl col mus _; do
+      [ -n "$b" ] || continue
+      if [ ! -f "$tpl" ]; then miss "$b: template project not found: $tpl"
+      elif [ -n "$mus" ] && [ "$mus" != none ] && [ ! -f "$mus" ]; then miss "$b: music not found: $mus"
+      else ok "$b  ($(basename "$tpl"))"; fi
+    done < "$BRANDS"
+  fi
+  [ "$bad" = 0 ] && echo "All good." || echo "Fix the MISSING lines above."
+  return "$bad"
+}
+
+case "${1:-}" in
+  --brands)
+    [ -s "$BRANDS" ] || die "no brands yet. Add one from a finished project: autocut --set-brand NAME PROJECT.kdenlive"
+    column -t -s'|' "$BRANDS"; exit 0 ;;
+  --set-brand)
+    [ $# -ge 3 ] && [ -f "$3" ] || die "usage: autocut --set-brand NAME PROJECT.kdenlive [0xRRGGBB] [MUSIC.mp3|none] [HEARD]"
+    [[ "$2" != *"|"* ]] || die "a brand name can't contain |"
+    music="${5:-none}"; [ "$music" = none ] || { [ -f "$music" ] || die "music not found: $music"; music=$(realpath "$music"); }
+    heard="${6:-$(brand_field "$2" 5 || true)}"       # keep the old pattern when updating a brand
+    touch "$BRANDS"
+    grep -vi "^$2|" "$BRANDS" > "$BRANDS.tmp" || true
+    echo "$2|$(realpath "$3")|${4:-0x3b82f6}|$music${heard:+|$heard}" >> "$BRANDS.tmp" && mv "$BRANDS.tmp" "$BRANDS"
+    column -t -s'|' "$BRANDS"; exit 0 ;;
+  --check) check; exit $? ;;
+  -h|--help|"") usage; exit 0 ;;
+esac
+
+raw="" render=0 zoom="--zoom" template="" brand="" script="" offline=""
+value() { [ $# -ge 2 ] || die "$1 needs a value (see autocut --help)"; }
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --render) render=1 ;;
+    --no-zoom) zoom="" ;;
+    --offline) offline="--offline" ;;
+    --template) value "$@"; template="$2"; shift ;;
+    --brand) value "$@"; brand="$2"; shift ;;
+    --script) value "$@"; script="$2"; shift ;;
+    -h|--help) usage; exit 0 ;;
+    -*) die "unknown option $1 (see autocut --help)" ;;
+    *) raw="$1" ;;
+  esac
+  shift
+done
+[ -f "$raw" ] || die "recording not found: ${raw:-<none>}  (e.g. autocut \"\$HOME/Videos/OBS/my take.mp4\")"
+raw=$(realpath "$raw")
+[ -z "$script" ] || [ -f "$script" ] || die "script not found: $script"
+[ -x "$PY" ] || die "not set up yet: run $HOME_DIR/install.sh"
+command -v ffmpeg >/dev/null && command -v ffprobe >/dev/null || die "ffmpeg is not installed (see autocut --check)"
+name=$(basename "${raw%.*}")
+
+# script keywords help Whisper spell them (Cfx.re, server.cfg ...); they're part of the transcript cache key
+vocab=""
+if [ -n "$script" ]; then
+  script=$(realpath "$script")
+  vocab=$(cd "$HOME_DIR" && "$PY" -I -c "
+import sys; sys.path.insert(0, '.')
+from images import parse_script
+print(', '.join(dict.fromkeys(k['name'] for k in parse_script(open(sys.argv[1]).read())[1])))" "$script")
+  [ -n "$vocab" ] && echo "Keywords: $vocab" || echo "No [[keywords]] or [links](url) found in the script; no images will be added."
+fi
+mkdir -p "$HOME_DIR/cache"
+model_tag=""; [ "$MODEL" = small.en ] || model_tag=".${MODEL//\//_}"   # a different model hears differently
+cache="$HOME_DIR/cache/$name${vocab:+.$(echo "$vocab" | md5sum | cut -c1-8)}$model_tag.v2.json"   # v2: two-pass transcripts
+if [ ! -f "$cache" ] || [ "$raw" -nt "$cache" ]; then
+  echo "Transcribing $name ..."
+  "$PY" -I "$HOME_DIR/transcribe.py" "$raw" "$cache" --vocab "$vocab" --model "$MODEL" --device "$DEVICE" 2>&1 | grep -v -i warning || true
+  [ -s "$cache" ] || die "transcription failed"
+fi
+
+# which brand
+accent="0x3b82f6" music=""
+if [ -z "$template" ]; then
+  [ -s "$BRANDS" ] || die "no brands yet. Add one from a finished project: autocut --set-brand NAME PROJECT.kdenlive  (or pass --template FILE)"
+  if [ -z "$brand" ]; then
+    brand=$(guess_brand "$(cat "$cache")"); why="from what you said"
+    if [ -z "$brand" ] && [ -n "$script" ]; then
+      brand=$(guess_brand "$(basename "$script")"$'\n'"$(cat "$script")"); why="from the script"
+    fi
+    if [ -z "$brand" ]; then
+      brand=$(head -1 "$BRANDS" | cut -d'|' -f1); why="no brand name heard, using your first one"
+    fi
+    echo "Brand: $brand ($why; override with --brand)"
+  fi
+  template=$(brand_field "$brand" 2)
+  [ -n "$template" ] || die "unknown brand '$brand'. Brands: $(cut -d'|' -f1 "$BRANDS" | tr '\n' ' ')"
+  accent=$(brand_field "$brand" 3)
+  music=$(brand_field "$brand" 4)
+fi
+[ -f "$template" ] || die "template project missing: $template"
+
+mkdir -p "$PROJECTS"
+out="$PROJECTS/$name (autocut).kdenlive"
+n=2; while [ -e "$out" ]; do out="$PROJECTS/$name (autocut $n).kdenlive"; n=$((n + 1)); done
+
+echo "Building project from template: $(basename "$template")"
+extra=()
+[ -n "$script" ] && extra=(--script "$script" --img-dir "$IMAGES/$(basename "${out%.kdenlive}")" $offline)
+[ -n "$music" ] && [ "$music" != none ] && extra+=(--music "$music")
+result=$(cd "$HOME_DIR" && "$PY" -I build.py "$raw" "$cache" "$template" "$out" $zoom --accent "${accent:-0x3b82f6}" "${extra[@]}")
+echo "$result" | grep -E '^(cut (retake|filler|noise|stutter)|zoom|image)' || true
+last=$(echo "$result" | tail -1 | grep -o "'last_frame': [0-9]*" | grep -o '[0-9]*$')
+echo "$result" | tail -1
+echo "Project: $out"
+
+if [ "$render" = 1 ]; then
+  mkdir -p "$EXPORTS"
+  mp4="$EXPORTS/$(basename "${out%.kdenlive}").mp4"
+  echo "Rendering 1920x1080 60fps ..."
+  "$HOME_DIR/render.sh" "$out" "$mp4" "$last" >/dev/null || die "render failed (the project is fine; open it in Kdenlive, or see autocut --check)"
+  [ -s "$mp4" ] || die "render produced no video (the project is fine; open it in Kdenlive, or see autocut --check)"
+  echo "Video:   $mp4"
+fi

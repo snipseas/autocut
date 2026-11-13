@@ -1,0 +1,4 @@
+# Python packages autocut needs (install.sh puts them in ./venv).
+# Tested with faster-whisper 1.2.1 and numpy 2.5 on Python 3.12.
+faster-whisper>=1.1
+numpy

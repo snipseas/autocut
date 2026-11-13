@@ -1,0 +1,7 @@
+# made on your machine, never shared
+venv/
+models/
+cache/
+__pycache__/
+brands
+brands.tmp

@@ -1,0 +1,24 @@
+# autocut settings. Copy to ~/.config/autocut/config and uncomment what you want to change.
+# Plain NAME=value lines: no quotes needed, spaces in paths are fine, ~ and $HOME work.
+# The values shown are the defaults.
+
+# Where new projects (.kdenlive) are written
+#AUTOCUT_PROJECTS=~/Videos/kdenlive
+
+# Where --render writes the MP4
+#AUTOCUT_EXPORTS=~/Videos/kdenlive exports
+
+# Where the keyword cards made for each project are saved
+#AUTOCUT_IMAGES=~/Videos/media imports/autocut images
+
+# Your own keyword images, used before any web lookup: <keyword>.png / .jpg / .webp
+#AUTOCUT_KEYWORDS=~/Videos/media imports/keywords
+
+# Speech model (faster-whisper name). small.en is quick on a CPU; medium.en is slower and more accurate.
+#AUTOCUT_MODEL=small.en
+
+# cpu or cuda (cuda needs an NVIDIA card with the CUDA 12 + cuDNN libraries installed)
+#AUTOCUT_DEVICE=cpu
+
+# Command to run melt for --render. Default: the Kdenlive Flatpak's melt, else melt on your PATH.
+#AUTOCUT_MELT=melt
